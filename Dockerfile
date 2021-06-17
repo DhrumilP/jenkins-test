@@ -1,6 +1,6 @@
 FROM adoptopenjdk/openjdk11:jdk-11.0.11_9-debian
 
-RUN apt-get update && apt-get upgrade -y && apt-get install -y git curl && curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash && apt-get install -y git-lfs unzip && git lfs install && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade -y && apt-get install -y git curl dpkg gpg tar && rm -rf /var/lib/apt/lists/*
 
 ARG user=jenkins
 ARG group=jenkins
@@ -9,11 +9,21 @@ ARG gid=1000
 ARG http_port=8080
 ARG agent_port=50000
 ARG JENKINS_HOME=/var/jenkins_home
-ARG REF=/usr/share/jenkins/ref
 
 ENV JENKINS_HOME $JENKINS_HOME
 ENV JENKINS_SLAVE_AGENT_PORT ${agent_port}
-ENV REF $REF
+
+# Install git lfs per https://github.com/git-lfs/git-lfs#from-binary
+# Avoid JENKINS-59569 - git LFS 2.7.1 fails clone with reference repository
+ARG GIT_LFS_VERSION=v2.11.0
+ENV GIT_LFS_VERSION $GIT_LFS_VERSION
+RUN curl -fsSLO https://github.com/git-lfs/git-lfs/releases/download/${GIT_LFS_VERSION}/git-lfs-linux-$(dpkg --print-architecture)-${GIT_LFS_VERSION}.tar.gz \
+  && curl -fsSLO https://github.com/git-lfs/git-lfs/releases/download/${GIT_LFS_VERSION}/sha256sums.asc \
+  && curl -L https://github.com/bk2204.gpg | gpg --no-tty --import \
+  && gpg -d sha256sums.asc | grep git-lfs-linux-$(dpkg --print-architecture)-${GIT_LFS_VERSION}.tar.gz | sha256sum -c \
+  && tar -zvxf git-lfs-linux-$(dpkg --print-architecture)-${GIT_LFS_VERSION}.tar.gz git-lfs \
+  && mv git-lfs /usr/bin/ \
+  && rm -rf git-lfs-linux-$(dpkg --print-architecture)-${GIT_LFS_VERSION}.tar.gz sha256sums.asc /root/.gnupg
 
 # Jenkins is run with user `jenkins`, uid = 1000
 # If you bind mount a volume from the host or a data container,
@@ -27,10 +37,10 @@ RUN mkdir -p $JENKINS_HOME \
 # can be persisted and survive image upgrades
 VOLUME $JENKINS_HOME
 
-# $REF (defaults to `/usr/share/jenkins/ref/`) contains all reference configuration we want
+# `/usr/share/jenkins/ref/` contains all reference configuration we want
 # to set on a fresh new installation. Use it to bundle additional plugins
 # or config file with your custom jenkins Docker image.
-RUN mkdir -p ${REF}/init.groovy.d
+RUN mkdir -p /usr/share/jenkins/ref/init.groovy.d
 
 # Use tini as subreaper in Docker container to adopt zombie processes
 ARG TINI_VERSION=v0.16.1
@@ -60,10 +70,7 @@ RUN curl -fsSL ${JENKINS_URL} -o /usr/share/jenkins/jenkins.war \
 ENV JENKINS_UC https://updates.jenkins.io
 ENV JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental
 ENV JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals
-RUN chown -R ${user} "$JENKINS_HOME" "$REF"
-
-ARG PLUGIN_CLI_URL=https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/2.9.0/jenkins-plugin-manager-2.9.0.jar
-RUN curl -fsSL ${PLUGIN_CLI_URL} -o /usr/lib/jenkins-plugin-manager.jar
+RUN chown -R ${user} "$JENKINS_HOME" /usr/share/jenkins/ref
 
 # for main web interface:
 EXPOSE ${http_port}
@@ -72,16 +79,16 @@ EXPOSE ${http_port}
 EXPOSE ${agent_port}
 
 ENV COPY_REFERENCE_FILE_LOG $JENKINS_HOME/copy_reference_file.log
-ENV JENKINS_ENABLE_FUTURE_JAVA=true
 
 USER ${user}
+
+# Invoke Git LFS
+RUN git lfs install
 
 COPY jenkins-support /usr/local/bin/jenkins-support
 COPY jenkins.sh /usr/local/bin/jenkins.sh
 COPY tini-shim.sh /bin/tini
-COPY jenkins-plugin-cli.sh /bin/jenkins-plugin-cli
-
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/jenkins.sh"]
 
-# from a derived Dockerfile, can use `RUN install-plugins.sh active.txt` to setup $REF/plugins from a support bundle
+# from a derived Dockerfile, can use `RUN install-plugins.sh active.txt` to setup /usr/share/jenkins/ref/plugins from a support bundle
 COPY install-plugins.sh /usr/local/bin/install-plugins.sh
